@@ -139,4 +139,117 @@ postgres@ubuntu:~$ less /var/log/postgresql/postgresql-16-main.log
 2024-03-24 12:33:24.058 MSK [12380] LOG:  checkpoint complete: wrote 1818 buffers (11.1%); 0 WAL file(s) added, 0 removed, 1 recycled; write=26.868 s, sync=0.014 s, total=26.890 s; sync files=11, longest>
 ```
 
+### Включаем асинхронный режим записи журнала
 
+```sql
+postgres=# set synchronous_commit = off;
+SET
+postgres@ubuntu:~$ pgbench -P 60 -T 600 dbwal
+pgbench (16.2 (Ubuntu 16.2-1.pgdg22.04+1))
+starting vacuum...end.
+progress: 60.0 s, 1120.8 tps, lat 0.892 ms stddev 0.382, 0 failed
+progress: 120.0 s, 1053.8 tps, lat 0.948 ms stddev 0.422, 0 failed
+progress: 180.0 s, 1025.9 tps, lat 0.974 ms stddev 0.497, 0 failed
+progress: 240.0 s, 1127.3 tps, lat 0.887 ms stddev 0.357, 0 failed
+progress: 300.0 s, 1053.1 tps, lat 0.949 ms stddev 0.399, 0 failed
+progress: 360.0 s, 1076.7 tps, lat 0.928 ms stddev 0.372, 0 failed
+progress: 420.0 s, 1094.6 tps, lat 0.913 ms stddev 0.410, 0 failed
+progress: 480.0 s, 1062.1 tps, lat 0.941 ms stddev 0.418, 0 failed
+progress: 540.0 s, 1107.6 tps, lat 0.902 ms stddev 0.303, 0 failed
+progress: 600.0 s, 1067.4 tps, lat 0.936 ms stddev 0.441, 0 failed
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+duration: 600 s
+number of transactions actually processed: 647358
+number of failed transactions: 0 (0.000%)
+latency average = 0.926 ms
+latency stddev = 0.403 ms
+initial connection time = 3.460 ms
+tps = 1078.935792 (without initial connection time)
+postgres@ubuntu:~$ 
+
+-- показатель tps выше, т.к. сессия в данном случае не ждёт, когда журналы будут сброшены на диск
+```
+
+### создаем копию кластера с выключенной контрольной суммой страниц
+
+```sql
+fedor@ubuntu:~$ echo "initdb_options = '--data-checksums'" | sudo tee /etc/postgresql-common/createcluster.d/initdb-options.conf
+initdb_options = '--data-checksums'
+fedor@ubuntu:~$ sudo pg_createcluster 16 main2
+Creating new PostgreSQL cluster 16/main2 ...
+/usr/lib/postgresql/16/bin/initdb -D /var/lib/postgresql/16/main2 --auth-local peer --auth-host scram-sha-256 --no-instructions --data-checksums
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with this locale configuration:
+  provider:    libc
+  LC_COLLATE:  en_US.UTF-8
+  LC_CTYPE:    en_US.UTF-8
+  LC_MESSAGES: en_US.UTF-8
+  LC_MONETARY: ru_RU.UTF-8
+  LC_NUMERIC:  ru_RU.UTF-8
+  LC_TIME:     ru_RU.UTF-8
+The default database encoding has accordingly been set to "UTF8".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+fixing permissions on existing directory /var/lib/postgresql/16/main2 ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default max_connections ... 100
+selecting default shared_buffers ... 128MB
+selecting default time zone ... Europe/Moscow
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+Ver Cluster Port Status Owner    Data directory               Log file
+16  main2   5433 down   postgres /var/lib/postgresql/16/main2 /var/log/postgresql/postgresql-16-main2.log
+fedor@ubuntu:~$ sudo pg_ctlcluster 16 main2 start
+fedor@ubuntu:~$ 
+
+fedor@ubuntu:~$ sudo -u postgres psql -p 5433
+psql (16.2 (Ubuntu 16.2-1.pgdg22.04+1))
+Type "help" for help.
+
+postgres=# create table checksumtest(t text);
+CREATE TABLE
+postgres=# insert into checksumtest select x from 
+postgres-# generate_seri
+postgres-# generate_series(1, 100) x;
+INSERT 0 100
+postgres=# select pg_relation_filepath('checksumtest') \gx
+-[ RECORD 1 ]--------+-------------
+pg_relation_filepath | base/5/16388
+
+postgres=# 
+
+
+postgres@ubuntu:/home/fedor$ pg_ctlcluster 16 main2 stop;
+postgres@ubuntu:/home/fedor$ nano /var/lib/postgresql/16/main2/base/5/16388
+postgres@ubuntu:/home/fedor$ pg_ctlcluster 16 main2 start
+Warning: the cluster will not be running as a systemd service. Consider using systemctl:
+  sudo systemctl start postgresql@16-main2
+postgres@ubuntu:/home/fedor$ 
+
+
+
+postgres=# select * from checksumtest ;
+ t 
+---
+(0 rows) -- видимо удалил данных в файле, больше, чем нужно
+
+postgres=# show ignore_checksum_failure ;
+ ignore_checksum_failure 
+-------------------------
+ off
+(1 row)
+
+postgres=# 
+```
